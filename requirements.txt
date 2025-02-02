@@ -1,5 +1,5 @@
-pandas
-fuzzywuzzy
-scikit-learn
-python-Levenshtein
 streamlit
+pandas
+rapidfuzz
+scikit-learn
+
