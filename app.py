@@ -9,24 +9,25 @@ def extract_first_words(text, num_words=4):
     return " ".join(text.split()[:num_words]).lower()
 
 def identify_merge_candidates(df, title_threshold=80, first_words_threshold=85, meta_threshold=80, topic_threshold=0.7):
-    # Check for required columns
+    # Check for required columns.
     required_cols = ["url", "title_tag", "meta_description", "organic_sessions", "pageviews", "pubdate"]
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
         st.error(f"Missing columns: {', '.join(missing_cols)}")
         return pd.DataFrame()
     
-    # Drop rows with missing data and convert pubdate to datetime
-    df = df.dropna(subset=required_cols)
+    # Drop rows with missing essential fields.
+    df = df.dropna(subset=["url", "title_tag", "organic_sessions", "pageviews", "pubdate"])
     df["pubdate"] = pd.to_datetime(df["pubdate"], errors="coerce")
     
-    # Clean text fields
-    df["title_tag"] = df["title_tag"].str.lower().str.strip()
-    df["meta_description"] = df["meta_description"].str.lower().str.strip()
+    # Clean text fields.
+    df["title_tag"] = df["title_tag"].fillna("").astype(str).str.lower().str.strip()
+    df["meta_description"] = df["meta_description"].fillna("").astype(str).str.lower().str.strip()
+    
     df["first_words"] = df["title_tag"].apply(lambda x: extract_first_words(x, num_words=4))
     df["combined_text"] = df["title_tag"] + " " + df["meta_description"]
     
-    # Build TF-IDF matrix on combined text for topic similarity
+    # Build TF-IDF matrix on combined text for topic similarity.
     vectorizer = TfidfVectorizer(stop_words='english')
     tfidf_matrix = vectorizer.fit_transform(df["combined_text"])
     cosine_sim = cosine_similarity(tfidf_matrix)
@@ -37,21 +38,19 @@ def identify_merge_candidates(df, title_threshold=80, first_words_threshold=85, 
     progress_count = 0
     progress_bar = st.progress(0)
     
-    # Loop over each pair
+    # Loop over each pair.
     for i in range(n):
         for j in range(i + 1, n):
-            # Use token_set_ratio for improved fuzzy matching
             title_similarity = token_set_ratio(df.iloc[i]["title_tag"], df.iloc[j]["title_tag"])
             meta_similarity = token_set_ratio(df.iloc[i]["meta_description"], df.iloc[j]["meta_description"])
             first_words_similarity = token_set_ratio(df.iloc[i]["first_words"], df.iloc[j]["first_words"])
             topic_similarity = cosine_sim[i, j]
             
-            # Check if the pair meets our thresholds.
             if first_words_similarity >= first_words_threshold and (
-               title_similarity >= title_threshold or 
-               meta_similarity >= meta_threshold or 
-               topic_similarity >= topic_threshold):
-               
+                title_similarity >= title_threshold or 
+                meta_similarity >= meta_threshold or 
+                topic_similarity >= topic_threshold):
+                
                 try:
                     page1_score = float(df.iloc[i]["organic_sessions"]) + float(df.iloc[i]["pageviews"])
                     page2_score = float(df.iloc[j]["organic_sessions"]) + float(df.iloc[j]["pageviews"])
@@ -59,7 +58,6 @@ def identify_merge_candidates(df, title_threshold=80, first_words_threshold=85, 
                     st.error("Error converting organic_sessions or pageviews to numbers.")
                     continue
                 
-                # Decide the primary page based on score or pubdate.
                 if page1_score > page2_score:
                     primary_page, secondary_page = df.iloc[i], df.iloc[j]
                 elif page2_score > page1_score:
@@ -83,7 +81,7 @@ def identify_merge_candidates(df, title_threshold=80, first_words_threshold=85, 
                     "Secondary Page Score": page2_score
                 })
             progress_count += 1
-        # Update progress bar after each outer loop iteration.
+        # Update progress bar.
         if total_comparisons > 0:
             progress_bar.progress(progress_count / total_comparisons)
     
