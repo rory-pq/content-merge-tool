@@ -13,21 +13,23 @@ def extract_first_words(text, num_words=4):
     return " ".join(text.split()[:num_words]).lower()
 
 def identify_merge_candidates(df, title_threshold=80, first_words_threshold=85, meta_threshold=80, topic_threshold=0.8):
-    required_cols = ["url", "title_tag", "meta_description", "organic_sessions", "pageviews", "pubdate"]
+    required_cols = ["url", "title_tag", "meta_description", "organic_sessions", "pageviews", "pubdate", "engagement_rate"]
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
         st.error(f"Missing columns: {', '.join(missing_cols)}")
         return pd.DataFrame()
     
     df = df.dropna(subset=["url", "title_tag", "organic_sessions", "pageviews", "pubdate"])
-    df["pubdate"] = pd.to_datetime(df["pubdate"], errors="coerce")
+    
+    # Convert pubdate to a consistent format
+    df["pubdate"] = pd.to_datetime(df["pubdate"], errors="coerce", format='%m/%d/%Y')
     
     df["title_tag"] = df["title_tag"].fillna("").astype(str).str.lower().str.strip()
     df["meta_description"] = df["meta_description"].fillna("").astype(str).str.lower().str.strip()
     df["first_words"] = df["title_tag"].apply(lambda x: extract_first_words(x, num_words=4))
     df["combined_text"] = df["title_tag"] + " " + df["meta_description"]
 
-    # **New:** Generate embeddings for topic comparison
+    # Generate embeddings for topic comparison
     embeddings = sbert_model.encode(df["combined_text"].tolist(), convert_to_tensor=True)
     
     merge_candidates = []
@@ -41,30 +43,24 @@ def identify_merge_candidates(df, title_threshold=80, first_words_threshold=85, 
             title_similarity = token_set_ratio(df.iloc[i]["title_tag"], df.iloc[j]["title_tag"])
             meta_similarity = token_set_ratio(df.iloc[i]["meta_description"], df.iloc[j]["meta_description"])
             first_words_similarity = token_set_ratio(df.iloc[i]["first_words"], df.iloc[j]["first_words"])
-
-            # **New:** Compute topic similarity with SBERT
             topic_similarity = float(util.pytorch_cos_sim(embeddings[i], embeddings[j]))
 
             if first_words_similarity >= first_words_threshold and (
                 title_similarity >= title_threshold or 
                 meta_similarity >= meta_threshold) and topic_similarity >= topic_threshold:
                 
-                try:
-                    page1_score = float(df.iloc[i]["organic_sessions"]) + float(df.iloc[i]["pageviews"])
-                    page2_score = float(df.iloc[j]["organic_sessions"]) + float(df.iloc[j]["pageviews"])
-                except Exception:
-                    st.error("Error converting organic_sessions or pageviews to numbers.")
-                    continue
+                page1_score = df.iloc[i]["organic_sessions"] + df.iloc[i]["pageviews"]
+                page2_score = df.iloc[j]["organic_sessions"] + df.iloc[j]["pageviews"]
+
+                # If scores are too close, use engagement rate as a tiebreaker
+                if abs(page1_score - page2_score) < 10:
+                    page1_score += df.iloc[i]["engagement_rate"] * 100
+                    page2_score += df.iloc[j]["engagement_rate"] * 100
                 
                 if page1_score > page2_score:
                     primary_page, secondary_page = df.iloc[i], df.iloc[j]
-                elif page2_score > page1_score:
-                    primary_page, secondary_page = df.iloc[j], df.iloc[i]
                 else:
-                    primary_page, secondary_page = (
-                        (df.iloc[i], df.iloc[j]) if df.iloc[i]["pubdate"] > df.iloc[j]["pubdate"]
-                        else (df.iloc[j], df.iloc[i])
-                    )
+                    primary_page, secondary_page = df.iloc[j], df.iloc[i]
                 
                 merge_candidates.append({
                     "Primary Title": primary_page["title_tag"],
@@ -91,7 +87,7 @@ uploaded_file = st.file_uploader("Upload your content audit CSV", type=["csv"])
 title_threshold = st.slider("Title Similarity Threshold (%)", 50, 100, 80)
 first_words_threshold = st.slider("First Words Similarity Threshold (%)", 50, 100, 85)
 meta_threshold = st.slider("Meta Description Similarity Threshold (%)", 50, 100, 80)
-topic_threshold = st.slider("Topic Similarity Threshold (0-1)", 0.0, 1.0, 0.8)  # **Increased from 0.7 to 0.8**
+topic_threshold = st.slider("Topic Similarity Threshold (0-1)", 0.0, 1.0, 0.8)
 
 if uploaded_file:
     try:
