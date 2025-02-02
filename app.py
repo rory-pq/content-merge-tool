@@ -1,85 +1,69 @@
 import streamlit as st
 import pandas as pd
 from fuzzywuzzy import fuzz
-from io import BytesIO
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-# Streamlit App Title
+def extract_first_words(title, num_words=4):
+    return " ".join(title.split()[:num_words]).lower()
+
+def identify_merge_candidates(df, title_threshold=80, first_words_threshold=85, topic_threshold=0.7):
+    df = df.dropna(subset=["url", "title_tag", "organic_sessions", "pageviews", "pubdate"])
+    df["pubdate"] = pd.to_datetime(df["pubdate"], errors="coerce")
+    df["first_words"] = df["title_tag"].apply(lambda x: extract_first_words(x, num_words=4))
+    
+    vectorizer = TfidfVectorizer(stop_words='english')
+    tfidf_matrix = vectorizer.fit_transform(df["title_tag"].str.lower())
+    cosine_sim = cosine_similarity(tfidf_matrix)
+    
+    merge_candidates = []
+    for i in range(len(df)):
+        for j in range(i + 1, len(df)):
+            full_title_similarity = fuzz.ratio(df.iloc[i]["title_tag"], df.iloc[j]["title_tag"])
+            first_words_similarity = fuzz.ratio(df.iloc[i]["first_words"], df.iloc[j]["first_words"])
+            topic_similarity = cosine_sim[i, j]
+            
+            if first_words_similarity >= first_words_threshold and (full_title_similarity >= title_threshold or topic_similarity >= topic_threshold):
+                page1_score = df.iloc[i]["organic_sessions"] + df.iloc[i]["pageviews"]
+                page2_score = df.iloc[j]["organic_sessions"] + df.iloc[j]["pageviews"]
+                
+                if page1_score > page2_score:
+                    primary_page, secondary_page = df.iloc[i], df.iloc[j]
+                elif page2_score > page1_score:
+                    primary_page, secondary_page = df.iloc[j], df.iloc[i]
+                else:
+                    primary_page, secondary_page = (df.iloc[i], df.iloc[j]) if df.iloc[i]["pubdate"] > df.iloc[j]["pubdate"] else (df.iloc[j], df.iloc[i])
+                
+                merge_candidates.append({
+                    "Primary Title": primary_page["title_tag"],
+                    "Primary URL": primary_page["url"],
+                    "Secondary Title": secondary_page["title_tag"],
+                    "Secondary URL": secondary_page["url"],
+                    "First Words Similarity": first_words_similarity,
+                    "Title Similarity": full_title_similarity,
+                    "Topic Similarity": topic_similarity,
+                    "Primary Page Score": page1_score,
+                    "Secondary Page Score": page2_score
+                })
+    
+    return pd.DataFrame(merge_candidates)
+
 st.title("🔍 Content Audit - Page Merge Tool")
-
-# File Upload
 uploaded_file = st.file_uploader("Upload your content audit CSV", type=["csv"])
 
-# Set similarity threshold slider
-threshold = st.slider("Title Similarity Threshold (%)", 50, 100, 70)
-
-# Function to extract the last part of the URL (slug)
-def get_slug(url):
-    return url.rstrip('/').split('/')[-1]
+title_threshold = st.slider("Title Similarity Threshold (%)", 50, 100, 80)
+first_words_threshold = st.slider("First Words Similarity Threshold (%)", 50, 100, 85)
+topic_threshold = st.slider("Topic Similarity Threshold (0-1)", 0.0, 1.0, 0.7)
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
-
-    # Ensure necessary columns exist
-    required_columns = ["url", "title_tag", "organic_sessions", "pageviews", "engagement_rate", "dofollow_backlinks", "pubdate"]
-    missing_cols = [col for col in required_columns if col not in df.columns]
-
-    if missing_cols:
-        st.error(f"Missing columns: {', '.join(missing_cols)}. Please upload a valid CSV.")
+    merge_df = identify_merge_candidates(df, title_threshold, first_words_threshold, topic_threshold)
+    
+    if not merge_df.empty:
+        st.write("### 📊 Potential Merge Candidates")
+        st.dataframe(merge_df)
+        
+        output_csv = merge_df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download Merge Candidates CSV", output_csv, "merge_candidates.csv", "text/csv")
     else:
-        # Convert pubdate to datetime
-        df["pubdate"] = pd.to_datetime(df["pubdate"], errors="coerce")
-
-        # Add slug column
-        df["slug"] = df["url"].apply(get_slug)
-
-        # Store merge candidates
-        merge_candidates = []
-
-        # Compare each page with every other page
-        for i, row1 in df.iterrows():
-            for j, row2 in df.iterrows():
-                if i >= j:  # Avoid duplicate comparisons
-                    continue
-
-                title_similarity = fuzz.ratio(str(row1["title_tag"]), str(row2["title_tag"]))
-                url_similarity = fuzz.ratio(str(row1["slug"]), str(row2["slug"]))
-
-                if title_similarity >= threshold or url_similarity >= threshold:
-                    # Calculate performance score
-                    page1_score = row1["organic_sessions"] + row1["pageviews"] + row1["engagement_rate"] + row1["dofollow_backlinks"]
-                    page2_score = row2["organic_sessions"] + row2["pageviews"] + row2["engagement_rate"] + row2["dofollow_backlinks"]
-
-                    # Choose the primary and secondary page
-                    if page1_score > page2_score:
-                        primary_page, secondary_page = row1, row2
-                    elif page2_score > page1_score:
-                        primary_page, secondary_page = row2, row1
-                    else:  # If scores are equal, pick the newer pubdate
-                        primary_page, secondary_page = (row1, row2) if row1["pubdate"] > row2["pubdate"] else (row2, row1)
-
-                    merge_candidates.append({
-                        "Primary Title": primary_page["title_tag"],
-                        "Primary URL": primary_page["url"],
-                        "Secondary Title": secondary_page["title_tag"],
-                        "Secondary URL": secondary_page["url"],
-                        "Title Similarity": title_similarity,
-                        "URL Similarity": url_similarity,
-                        "Primary Page Score": page1_score,
-                        "Secondary Page Score": page2_score
-                    })
-
-        # Convert results to DataFrame
-        merge_df = pd.DataFrame(merge_candidates)
-
-        if not merge_df.empty:
-            # Show results in Streamlit
-            st.write("### 📊 Potential Merge Candidates")
-            st.dataframe(merge_df)
-
-            # Provide a download button for CSV
-            output = BytesIO()
-            merge_df.to_csv(output, index=False)
-            output.seek(0)
-            st.download_button("📥 Download Merge Candidates CSV", output, "merge_candidates.csv", "text/csv")
-        else:
-            st.info("No merge candidates found based on the selected similarity threshold.")
+        st.info("No merge candidates found based on the selected similarity thresholds.")
